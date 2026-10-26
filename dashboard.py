@@ -126,3 +126,13 @@ def build_app(bot,store):
         bid=d.get('backup_id')
         if not isinstance(bid,int):raise HTTPException(400,'Select backup')
         row=await store.latest(gid,bid)
+        if not row:
+            raise HTTPException(404, 'Backup not found')
+
+        result = await restore_missing(g, parse(row))
+        await store.incident(
+            gid, s['uid'], 'dashboard_restore', str(bid)
+        )
+        return result
+
+    return app
