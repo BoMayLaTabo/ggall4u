@@ -6,6 +6,58 @@ from recovery import snapshot, parse, preview, restore_missing
 from html import escape
 
 API='https://discord.com/api/v10'
+PAGE = """
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>/gg.all.4u Dashboard</title>
+    <style>
+        body {
+            background: #10141f;
+            color: white;
+            font-family: Arial, sans-serif;
+            padding: 30px;
+        }
+        .card {
+            background: #1c2435;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 12px;
+        }
+        a { color: #8caaff; }
+    </style>
+</head>
+<body>
+    <h1>🛡 /gg.all.4u Security Dashboard</h1>
+    <div id="content" class="card"></div>
+
+    <script id="boot" type="application/json">__BOOT__</script>
+    <script>
+        const data = JSON.parse(
+            document.getElementById("boot").textContent
+        );
+
+        const content = document.getElementById("content");
+
+        if (!data.loggedIn) {
+            content.innerHTML =
+                '<h2>Đăng nhập Discord</h2>' +
+                '<a href="/login">Login with Discord</a>';
+        } else {
+            content.innerHTML =
+                '<h2>Danh sách máy chủ</h2>' +
+                '<pre id="guilds"></pre>' +
+                '<a href="/logout">Logout</a>';
+
+            document.getElementById("guilds").textContent =
+                JSON.stringify(data.guilds || [], null, 2);
+        }
+    </script>
+</body>
+</html>
+"""
 def build_app(bot,store):
     app=FastAPI(title='/gg.all.4u Dashboard',docs_url=None,redoc_url=None)
     client_id=os.environ['DISCORD_CLIENT_ID']; secret=os.environ['DISCORD_CLIENT_SECRET']; base=os.environ['DASHBOARD_URL'].rstrip('/')
