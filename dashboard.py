@@ -92,8 +92,8 @@ def build_app(bot,store):
         incidents=await store.pool.fetch('SELECT id,created_at,actor_id,kind,detail FROM incidents WHERE guild_id=$1 ORDER BY id DESC LIMIT 50',gid)
         backups=await store.pool.fetch('SELECT id,created_at FROM backups WHERE guild_id=$1 ORDER BY id DESC LIMIT 30',gid)
         return {'guild':g.name,'id':str(gid),'config':cfg,'incidents':[{'id':r['id'],'time':r['created_at'].isoformat(),'actor':str(r['actor_id'] or ''),'kind':r['kind'],'detail':r['detail']} for r in incidents],'backups':[{'id':r['id'],'time':r['created_at'].isoformat()} for r in backups]}
-     @app.post('/api/guild/{gid}/trusted')
-     async def trusted(gid:int, request:Request):
+    @app.post('/api/guild/{gid}/trusted')
+    async def trusted(gid:int, request:Request):
         s = session(request)
         csrf(request, s)
         g = await allowed(gid, s)
