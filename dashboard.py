@@ -94,7 +94,7 @@ def build_app(bot,store):
         return {'guild':g.name,'id':str(gid),'config':cfg,'incidents':[{'id':r['id'],'time':r['created_at'].isoformat(),'actor':str(r['actor_id'] or ''),'kind':r['kind'],'detail':r['detail']} for r in incidents],'backups':[{'id':r['id'],'time':r['created_at'].isoformat()} for r in backups]}
     @app.post('/api/guild/{gid}/trusted')
     async def trusted(gid:int,request:Request):
-                s=session(request);csrf(request,s);g=await allowed(gid,s)
+        s=session(request);csrf(request,s);g=await allowed(gid,s)
         if g.owner_id!=s['uid']:raise HTTPException(403,'Server owner only')
         d=await request.json();uid=str(d.get('user_id',''))
         if not uid.isdigit() or len(uid)>20:raise HTTPException(400,'Invalid user ID')
@@ -126,5 +126,3 @@ def build_app(bot,store):
         bid=d.get('backup_id')
         if not isinstance(bid,int):raise HTTPException(400,'Select backup')
         row=await store.latest(gid,bid)
-
-
