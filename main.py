@@ -15,11 +15,8 @@ intents=discord.Intents.default();intents.members=True
 intents.message_content=os.getenv('ENABLE_MESSAGE_CONTENT','true').lower()=='true'
 class SecurityBot(commands.Bot):
     async def setup_hook(self):
-        synced = await self.tree.sync()
-        logging.info(
-            "GLOBAL SLASH COMMANDS SYNCED: %s",
-            len(synced)
-        )
+        await self.tree.sync()
+
 bot=SecurityBot(command_prefix=commands.when_mentioned, intents=intents,help_command=None)
 store=Store();security=Security(bot,store)
 

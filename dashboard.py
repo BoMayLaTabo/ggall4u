@@ -2,6 +2,8 @@ import os, secrets, urllib.parse, time, hmac, hashlib, base64, json
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from recovery import snapshot, parse, preview, restore_missing
+from html import escape
 
 API='https://discord.com/api/v10'
 def build_app(bot,store):
@@ -43,10 +45,14 @@ def build_app(bot,store):
     @app.get('/',response_class=HTMLResponse)
     async def home(request:Request):
         s=verify(request.cookies.get('tds_session',''))
-        if not s:return '<h2>/gg.all.4u</h2><p>Discord security dashboard</p><a href="/login">Login with Discord</a>'
-        guilds=[{'id':str(g.id),'name':g.name} for g in bot.guilds if (g.owner_id==s['uid'] or (g.get_member(s['uid']) and g.get_member(s['uid']).guild_permissions.administrator))]
-        # The API endpoints revalidate membership even if cached page omits a guild.
-        return HTMLResponse('''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>/gg.all.4u</title><style>body{font:16px system-ui;background:#101827;color:#e5ecf5;max-width:900px;margin:35px auto;padding:15px}button,select{padding:10px;margin:8px;background:#293b5a;color:white;border:1px solid #667}pre{white-space:pre-wrap;background:#1b2b42;padding:15px;border-radius:10px}a{color:#a6c7ff}</style><h1>🛡 /gg.all.4u</h1><a href="/logout">Log out</a><p>Choose server</p><select id="guild"></select><button onclick="load()">Refresh</button><pre id="out"></pre><button onclick="setFlag('antinuke')">Toggle Anti-Nuke</button><button onclick="setFlag('antiraid')">Toggle Anti-Raid</button><button onclick="setFlag('antispam')">Toggle Anti-Spam</button><script>const gs=GUILDS;const csrf=CSRF;guild.innerHTML=gs.map(g=>`<option value="${g.id}">${g.name.replaceAll('&','&amp;').replaceAll('<','&lt;')}</option>`).join('');async function load(){if(!guild.value)return;let r=await fetch('/api/guild/'+guild.value);out.textContent=JSON.stringify(await r.json(),null,2)}async function setFlag(k){let r=await fetch('/api/guild/'+guild.value+'/toggle',{method:'POST',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify({key:k})});out.textContent=JSON.stringify(await r.json(),null,2);await load()}load()</script>'''.replace('GUILDS',json.dumps(guilds)).replace('CSRF',json.dumps(s['csrf'])))
+        if not s:return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':False,'guilds':[],'csrf':''})))
+        guilds=[]
+        for g in bot.guilds:
+            try:
+                await allowed(g.id,s)
+                guilds.append({'id':str(g.id),'name':g.name})
+            except HTTPException:pass
+        return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':True,'guilds':guilds,'csrf':s['csrf']})))
     @app.get('/login')
     async def login():
         state=secrets.token_urlsafe(24)
@@ -80,4 +86,51 @@ def build_app(bot,store):
         cfg=await store.config(gid);cfg[key]=not cfg.get(key,True);await store.put(gid,cfg)
         await store.incident(gid,s['uid'],'dashboard_toggle',f'{key}={cfg[key]}')
         return {'key':key,'enabled':cfg[key]}
+    @app.get('/api/guild/{gid}/details')
+    async def details(gid:int,request:Request):
+        s=session(request);g=await allowed(gid,s);cfg=await store.config(gid)
+        incidents=await store.pool.fetch('SELECT id,created_at,actor_id,kind,detail FROM incidents WHERE guild_id=$1 ORDER BY id DESC LIMIT 50',gid)
+        backups=await store.pool.fetch('SELECT id,created_at FROM backups WHERE guild_id=$1 ORDER BY id DESC LIMIT 30',gid)
+        return {'guild':g.name,'id':str(gid),'config':cfg,'incidents':[{'id':r['id'],'time':r['created_at'].isoformat(),'actor':str(r['actor_id'] or ''),'kind':r['kind'],'detail':r['detail']} for r in incidents],'backups':[{'id':r['id'],'time':r['created_at'].isoformat()} for r in backups]}
+    @app.post('/api/guild/{gid}/trusted')
+    async def trusted(gid:int,request:Request):
+        s=session(request);csrf(request,s);g=await allowed(gid,s)
+        if g.owner_id!=s['uid']:raise HTTPException(403,'Server owner only')
+        d=await request.json();uid=str(d.get('user_id',''))
+        if not uid.isdigit() or len(uid)>20:raise HTTPException(400,'Invalid user ID')
+        member=await g.fetch_member(int(uid))
+        cfg=await store.config(gid);ids=set(map(int,cfg.get('trusted',[])))
+        if d.get('action')=='add':ids.add(member.id)
+        elif d.get('action')=='remove':ids.discard(member.id)
+        else:raise HTTPException(400,'Invalid action')
+        cfg['trusted']=sorted(ids);await store.put(gid,cfg)
+        await store.incident(gid,s['uid'],'dashboard_trusted',f"{d['action']} {uid}")
+        return {'trusted':cfg['trusted']}
+    @app.post('/api/guild/{gid}/backup')
+    async def create_backup(gid:int,request:Request):
+        s=session(request);csrf(request,s);g=await allowed(gid,s)
+        bid=await store.backup(gid,await snapshot(g));await store.incident(gid,s['uid'],'dashboard_backup',str(bid))
+        return {'backup_id':bid}
+    @app.get('/api/guild/{gid}/preview')
+    async def preview_backup(gid:int,request:Request,backup_id:int|None=None):
+        s=session(request);g=await allowed(gid,s)
+        row=await store.latest(gid,backup_id)
+        if not row:raise HTTPException(404,'Backup not found')
+        return {'backup_id':row['id'],'changes':preview(g,parse(row))}
+    @app.post('/api/guild/{gid}/restore')
+    async def restore_backup(gid:int,request:Request):
+        s=session(request);csrf(request,s);g=await allowed(gid,s)
+        if g.owner_id!=s['uid']:raise HTTPException(403,'Server owner only')
+        d=await request.json()
+        if d.get('confirmation')!=f'RESTORE-{gid}':raise HTTPException(400,'Confirmation mismatch')
+        bid=d.get('backup_id')
+        if not isinstance(bid,int):raise HTTPException(400,'Select backup')
+        row=await store.latest(gid,bid)
+        if not row:raise HTTPException(404,'Backup not found')
+        result=await restore_missing(g,parse(row),f'Dashboard restore by {s["uid"]}')
+        await store.incident(gid,s['uid'],'dashboard_restore',f'backup={bid} roles={len(result["roles"])} channels={len(result["channels"])}')
+        return result
     return app
+
+PAGE = r"""<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>/gg.all.4u Security</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b1020;color:#edf1ff;font:15px system-ui,Arial}header{padding:22px 5%;border-bottom:1px solid #29314a;display:flex;justify-content:space-between;align-items:center;background:#11182c}h1{font-size:23px;margin:0}h2{font-size:20px}main{max-width:1180px;margin:auto;padding:25px 18px}nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}.tab,button,select,input{background:#202b45;color:#fff;border:1px solid #394765;border-radius:9px;padding:11px 14px;font:inherit}button{cursor:pointer}button:hover,.tab.active{background:#5147a7}.danger{background:#722c48}.panel{background:#141e33;border:1px solid #303d58;border-radius:14px;padding:20px;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.muted{color:#aab7d3}.item{padding:13px;border-bottom:1px solid #303d58;overflow-wrap:anywhere}input{max-width:100%}#notice{white-space:pre-wrap;color:#cbd5ff;padding:10px}a{color:#b4b4ff}.hide{display:none}small{color:#b6c1db}</style><header><h1>🛡 /gg.all.4u <small>Security Dashboard</small></h1><a id="logout" href="/logout">Đăng xuất</a></header><main><section id="login" class="panel hide"><h2>Quản lý bảo mật Discord</h2><p>Đăng nhập để quản lý các máy chủ bạn có quyền quản trị.</p><a href="/login">Đăng nhập bằng Discord</a></section><section id="app" class="hide"><label>Máy chủ: <select id="guild"></select></label><button onclick="refresh()">Làm mới</button><nav id="tabs"></nav><div id="view"></div><div id="notice" role="status"></div></section></main><script>const BOOT=__BOOT__;const $=id=>document.getElementById(id);let data={},tab='overview';if(!BOOT.loggedIn){$('login').classList.remove('hide');$('logout').classList.add('hide')}else{$('app').classList.remove('hide');$('guild').innerHTML=BOOT.guilds.map(g=>'<option value="'+g.id+'">'+esc(g.name)+'</option>').join('');$('guild').onchange=refresh;refresh()}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function gid(){return $('guild').value}async function api(path,body){let r=await fetch('/api/guild/'+gid()+path,body===undefined?{}:{method:'POST',headers:{'content-type':'application/json','x-csrf-token':BOOT.csrf},body:JSON.stringify(body)});let j=await r.json();if(!r.ok)throw Error(j.detail||r.status);return j}async function refresh(){if(!gid()){$('view').textContent='Bot chưa có server nào bạn được phép quản lý.';return}try{data=await api('/details');render();$('notice').textContent=''}catch(e){$('notice').textContent=e.message}}const tabs=[['overview','Tổng quan'],['protection','Anti-Nuke / Raid'],['backup','Backup'],['recovery','Recovery'],['logs','Security Logs'],['trusted','Trusted Users']];function render(){ $('tabs').innerHTML=tabs.map(([k,n])=>'<button class="tab '+(tab===k?'active':'')+'" onclick="tab=''+k+'';render()">'+n+'</button>').join('');let cfg=data.config||{},v='';if(tab==='overview')v='<div class="grid">'+[['Server',data.guild],['Anti-Nuke',cfg.antinuke!==false?'Bật':'Tắt'],['Anti-Raid',cfg.antiraid!==false?'Bật':'Tắt'],['Anti-Spam',cfg.antispam!==false?'Bật':'Tắt'],['Bản sao lưu',data.backups.length],['Sự cố gần đây',data.incidents.length]].map(([a,b])=>'<div class="panel"><small>'+esc(a)+'</small><h2>'+esc(b)+'</h2></div>').join('')+'</div>';if(tab==='protection')v='<div class="panel"><h2>Điều khiển bảo vệ</h2>'+['antinuke','antiraid','antispam'].map(k=>'<div class="item"><b>'+k.toUpperCase()+'</b> — '+(cfg[k]!==false?'Đang bật':'Đang tắt')+' <button onclick="toggle(''+k+'')">Đổi trạng thái</button></div>').join('')+'</div>';if(tab==='backup')v='<div class="panel"><h2>Sao lưu cấu trúc</h2><p class="muted">Lưu vai trò và kênh vào PostgreSQL.</p><button onclick="backup()">Tạo backup ngay</button>'+data.backups.map(b=>'<div class="item">#'+b.id+' — '+esc(b.time)+'</div>').join('')+'</div>';if(tab==='recovery')v='<div class="panel"><h2>Khôi phục an toàn</h2><p class="muted">Chỉ tạo lại vai trò/kênh thiếu. Không khôi phục tin nhắn, quyền hay overwrites.</p><select id="bid">'+data.backups.map(b=>'<option value="'+b.id+'">Backup #'+b.id+' — '+esc(b.time)+'</option>').join('')+'</select> <button onclick="preview()">Xem trước</button><pre id="diff"></pre><button class="danger" onclick="restore()">Khôi phục (chủ server)</button></div>';if(tab==='logs')v='<div class="panel"><h2>50 sự cố gần nhất</h2>'+data.incidents.map(x=>'<div class="item"><b>'+esc(x.kind)+'</b> • '+esc(x.time)+'<br><small>Actor: '+esc(x.actor)+'</small><p>'+esc(x.detail)+'</p></div>').join('')+'</div>';if(tab==='trusted')v='<div class="panel"><h2>Trusted Users</h2><p class="muted">Chỉ chủ server được thay đổi.</p><input id="uid" placeholder="Discord User ID" inputmode="numeric"> <button onclick="trusted('add')">Thêm</button> <button onclick="trusted('remove')">Xóa</button><h3>Danh sách</h3>'+((cfg.trusted||[]).map(x=>'<div class="item">'+esc(x)+'</div>').join('')||'Chưa có người tin cậy')+'</div>';$('view').innerHTML=v}async function action(f){try{let x=await f();$('notice').textContent=JSON.stringify(x,null,2);await refresh()}catch(e){$('notice').textContent='Lỗi: '+e.message}}function toggle(key){action(()=>api('/toggle',{key}))}function backup(){action(()=>api('/backup',{}))}function trusted(actionName){let user_id=$('uid').value.trim();if(!/^\d{15,20}$/.test(user_id))return alert('Nhập User ID hợp lệ');action(()=>api('/trusted',{action:actionName,user_id}))}async function preview(){try{let x=await api('/preview?backup_id='+$('bid').value);$('diff').textContent=JSON.stringify(x,null,2)}catch(e){$('notice').textContent=e.message}}function restore(){let bid=Number($('bid').value),confirmation=prompt('Nhập RESTORE-'+gid()+' để xác nhận khôi phục backup #'+bid);if(!confirmation)return;action(()=>api('/restore',{backup_id:bid,confirmation}))}</script></html>"""
