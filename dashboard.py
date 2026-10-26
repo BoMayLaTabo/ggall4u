@@ -1,85 +1,3 @@
-import os, secrets, urllib.parse, time, hmac, hashlib, base64, json
-import httpx
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from recovery import snapshot, parse, preview, restore_missing
-from html import escape
-
-API='https://discord.com/api/v10'
-PAGE = """
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>/gg.all.4u Dashboard</title>
-    <style>
-        body {
-            background: #10141f;
-            color: white;
-            font-family: Arial, sans-serif;
-            padding: 30px;
-        }
-        .card {
-            background: #1c2435;
-            padding: 20px;
-            margin: 15px 0;
-            border-radius: 12px;
-        }
-        a { color: #8caaff; }
-    </style>
-</head>
-<body>
-    <h1>🛡 /gg.all.4u Security Dashboard</h1>
-    <div id="content" class="card"></div>
-
-    <script id="boot" type="application/json">__BOOT__</script>
-    <script>
-        const data = JSON.parse(
-            document.getElementById("boot").textContent
-        );
-
-        const content = document.getElementById("content");
-
-        if (!data.loggedIn) {
-            content.innerHTML =
-                '<h2>Đăng nhập Discord</h2>' +
-                '<a href="/login">Login with Discord</a>';
-        } else {
-            content.innerHTML =
-                '<h2>Danh sách máy chủ</h2>' +
-                '<pre id="guilds"></pre>' +
-                '<a href="/logout">Logout</a>';
-
-            document.getElementById("guilds").textContent =
-                JSON.stringify(data.guilds || [], null, 2);
-        }
-    </script>
-</body>
-</html>
-"""
-def build_app(bot,store):
-    app=FastAPI(title='/gg.all.4u Dashboard',docs_url=None,redoc_url=None)
-    client_id=os.environ['DISCORD_CLIENT_ID']; secret=os.environ['DISCORD_CLIENT_SECRET']; base=os.environ['DASHBOARD_URL'].rstrip('/')
-    signing=os.environ['SESSION_SECRET'].encode()
-    if len(signing)<32: raise RuntimeError('SESSION_SECRET must have >=32 chars')
-    def sign(data):
-        raw=base64.urlsafe_b64encode(json.dumps(data,separators=(',',':')).encode()).decode()
-        mac=hmac.new(signing,raw.encode(),hashlib.sha256).hexdigest()
-        return raw+'.'+mac
-    def verify(token):
-        try:
-            raw,mac=token.rsplit('.',1)
-            if not hmac.compare_digest(hmac.new(signing,raw.encode(),hashlib.sha256).hexdigest(),mac): return None
-            data=json.loads(base64.urlsafe_b64decode(raw+'==='))
-            return data if data['exp']>time.time() else None
-        except Exception:return None
-    def session(request):
-        data=verify(request.cookies.get('tds_session',''))
-        if not data: raise HTTPException(401,'Login required')
-        return data
-    def csrf(request,s):
-        if not hmac.compare_digest(request.headers.get('x-csrf-token',''),s['csrf']):raise HTTPException(403,'Invalid CSRF token')
         if request.headers.get('origin')!=base:raise HTTPException(403,'Invalid origin')
     async def allowed(gid,s):
         g=bot.get_guild(gid)
@@ -97,14 +15,14 @@ def build_app(bot,store):
     @app.get('/',response_class=HTMLResponse)
     async def home(request:Request):
         s=verify(request.cookies.get('tds_session',''))
-        if not s:return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':False,'guilds':[],'csrf':''})))
+        if not s:return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':False,'guilds':[],'csrf':''}).replace('<', '\\u003c')))
         guilds=[]
         for g in bot.guilds:
             try:
                 await allowed(g.id,s)
                 guilds.append({'id':str(g.id),'name':g.name})
             except HTTPException:pass
-        return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':True,'guilds':guilds,'csrf':s['csrf']})))
+        return HTMLResponse(PAGE.replace('__BOOT__',json.dumps({'loggedIn':True,'guilds':guilds,'csrf':s['csrf']}).replace('<', '\\u003c')))
     @app.get('/login')
     async def login():
         state=secrets.token_urlsafe(24)
@@ -129,7 +47,7 @@ def build_app(bot,store):
     @app.get('/api/guild/{gid}')
     async def info(gid:int,request:Request):
         s=session(request);g=await allowed(gid,s);cfg=await store.config(gid)
-        return {'guild':g.name,'id':str(gid),'config':cfg,'recent_incidents':[dict(r) for r in await store.pool.fetch('SELECT id,created_at,actor_id,kind,detail FROM incidents WHERE guild_id=$1 ORDER BY id DESC LIMIT 20',gid)]}
+        return {'guild':g.name,'id':str(gid),'config':cfg,'recent_incidents':[{'id':r['id'],'time':r['created_at'].isoformat(),'actor':str(r['actor_id'] or ''),'kind':r['kind'],'detail':r['detail']} for r in await store.pool.fetch('SELECT id,created_at,actor_id,kind,detail FROM incidents WHERE guild_id=$1 ORDER BY id DESC LIMIT 20',gid)]}
     @app.post('/api/guild/{gid}/toggle')
     async def toggle(gid:int,request:Request):
         s=session(request);csrf(request,s);await allowed(gid,s)
