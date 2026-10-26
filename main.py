@@ -200,8 +200,20 @@ async def before_backup():await bot.wait_until_ready()
 
 async def run():
     await store.connect()
-    app=build_app(bot,store)
-    server=uvicorn.Server(uvicorn.Config(app,host='0.0.0.0',port=int(os.getenv('PORT','8080')),log_level='info'))
+       app = build_app(bot, store)
+
+    if app is None:
+        raise RuntimeError("Dashboard build_app() returned None")
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", "8080")),
+            log_level="info",
+            interface="asgi3"
+        )
+    )
     periodic_backup.start()
     try:
         async with bot:
