@@ -93,40 +93,19 @@ def build_app(bot,store):
         backups=await store.pool.fetch('SELECT id,created_at FROM backups WHERE guild_id=$1 ORDER BY id DESC LIMIT 30',gid)
         return {'guild':g.name,'id':str(gid),'config':cfg,'incidents':[{'id':r['id'],'time':r['created_at'].isoformat(),'actor':str(r['actor_id'] or ''),'kind':r['kind'],'detail':r['detail']} for r in incidents],'backups':[{'id':r['id'],'time':r['created_at'].isoformat()} for r in backups]}
     @app.post('/api/guild/{gid}/trusted')
-    async def trusted(gid:int, request:Request):
-        s = session(request)
-        csrf(request, s)
-        g = await allowed(gid, s)
-
-        if g.owner_id != s['uid']:
-            raise HTTPException(403, 'Server owner only')
-
-        d = await request.json()
-        uid = str(d.get('user_id', ''))
-
-        if not uid.isdigit() or len(uid) > 20:
-            raise HTTPException(400, 'Invalid user ID')
-
-        member = await g.fetch_member(int(uid))
-        cfg = await store.config(gid)
-        ids = set(map(int, cfg.get('trusted', [])))
-
-        if d.get('action') == 'add':
-            ids.add(member.id)
-        elif d.get('action') == 'remove':
-            ids.discard(member.id)
-        else:
-            raise HTTPException(400, 'Invalid action')
-
-        cfg['trusted'] = sorted(ids)
-        await store.put(gid, cfg)
-
-        await store.incident(
-            gid, s['uid'], 'dashboard_trusted',
-            f"{d['action']} {uid}"
-        )
-
-        return {'trusted': cfg['trusted']}
+    async def trusted(gid:int,request:Request):
+                s=session(request);csrf(request,s);g=await allowed(gid,s)
+        if g.owner_id!=s['uid']:raise HTTPException(403,'Server owner only')
+        d=await request.json();uid=str(d.get('user_id',''))
+        if not uid.isdigit() or len(uid)>20:raise HTTPException(400,'Invalid user ID')
+        member=await g.fetch_member(int(uid))
+        cfg=await store.config(gid);ids=set(map(int,cfg.get('trusted',[])))
+        if d.get('action')=='add':ids.add(member.id)
+        elif d.get('action')=='remove':ids.discard(member.id)
+        else:raise HTTPException(400,'Invalid action')
+        cfg['trusted']=sorted(ids);await store.put(gid,cfg)
+        await store.incident(gid,s['uid'],'dashboard_trusted',f"{d['action']} {uid}")
+        return {'trusted':cfg['trusted']}
     @app.post('/api/guild/{gid}/backup')
     async def create_backup(gid:int,request:Request):
         s=session(request);csrf(request,s);g=await allowed(gid,s)
@@ -147,3 +126,5 @@ def build_app(bot,store):
         bid=d.get('backup_id')
         if not isinstance(bid,int):raise HTTPException(400,'Select backup')
         row=await store.latest(gid,bid)
+
+
