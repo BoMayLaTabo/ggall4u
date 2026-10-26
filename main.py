@@ -200,8 +200,7 @@ async def before_backup():await bot.wait_until_ready()
 
 async def run():
     await store.connect()
-       app = build_app(bot, store)
-
+    app = build_app(bot, store)
     if app is None:
         raise RuntimeError("Dashboard build_app() returned None")
 
